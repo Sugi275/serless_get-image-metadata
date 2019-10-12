@@ -159,11 +159,14 @@ func selectImage(db *sql.DB, imageList ImageList) (ImageList, error) {
 }
 
 func validNull(nullString sql.NullString) string {
+	retS := ""
 	if nullString.Valid {
-		return nullString.String
+		retS = nullString.String
 	} else {
-		return ""
+		retS = ""
 	}
+
+	return retS
 }
 
 func getDSN() (string, error) {
