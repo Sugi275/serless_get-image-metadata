@@ -3,13 +3,13 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"time"
 
-	"github.com/Sugi275/serless_metadeta-to-oracledb/loglib"
-	"github.com/google/uuid"
+	"github.com/Sugi275/serless_get-image-metadata/loglib"
 	_ "github.com/mattn/go-oci8"
 )
 
@@ -25,16 +25,24 @@ const (
 	actionTypeDelete     = "com.oraclecloud.objectstorage.deleteobject"
 )
 
+// ImageList Image を複数格納するstruck
+type ImageList struct {
+	Object string  `json:"object"`
+	Type   string  `json:"type"`
+	Total  int     `json:"total"`
+	Data   []Image `json:"data"`
+}
+
 //Image Image
 type Image struct {
-	ID         string
-	ImageName  string
-	Detail     string
-	ImageURL   string
-	Owner      string
-	CreateDate time.Time
-	Deleted    int
-	Context    context.Context
+	ID          string    `json:"id"`
+	Object      string    `json:"object"`
+	Imagename   string    `json:"imagename"`
+	Detail      string    `json:"detail"`
+	ImageURL    string    `json:"image_url"`
+	Owner       string    `json:"owner"`
+	CreatedDate time.Time `json:"created_date"`
+	Deleted     int       `json:"deleted"`
 }
 
 func main() {
@@ -50,114 +58,112 @@ func fnMain(ctx context.Context, in io.Reader, out io.Writer) {
 	loglib.InitSugar()
 	defer loglib.Sugar.Sync()
 
-	imageConst, err := getImageConst(input.Data.ResourceName)
+	imageList, err := getImageList()
 	if err != nil {
 		loglib.Sugar.Error(err)
 		return
 	}
 
-	err = saveImageMetadata(imageConst)
-	if err != nil {
-		loglib.Sugar.Error(err)
-		return
-	}
+	json.NewEncoder(out).Encode(&imageList)
+
+	return
 }
 
-func getImageConst(imageName string) (Image, error) {
-	// Generate certificate name
-	const DateFormat = "20060102-1504"
-	jst := time.FixedZone("Asia/Tokyo", 9*60*60)
+func newImageListConst() ImageList {
+	var imageList ImageList
+	var images []Image
 
-	imageURL, err := getImageURL(imageName)
-	if err != nil {
-		loglib.Sugar.Error(err)
-		return Image{}, err
+	imageList = ImageList{
+		Object: "list",
+		Type:   "image",
+		Total:  0,
+		Data:   images,
 	}
 
-	image := Image{
-		ID:         uuid.New().String(),
-		ImageName:  imageName,
-		Detail:     "",
-		ImageURL:   imageURL,
-		Owner:      "",
-		CreateDate: time.Now().In(jst),
-		Deleted:    0, // 0:active 1:deleted
-		Context:    context.Background(),
-	}
-
-	loglib.Sugar.Infof("Generated ImageConst. ID:" + image.ID + " ImageName:" + image.ImageName + " ImageURL:" + image.ImageURL + " CreateDate:" + image.CreateDate.Format(DateFormat))
-
-	return image, nil
+	return imageList
 }
 
-func getImageURL(imageName string) (string, error) {
-	regionName, ok := os.LookupEnv(envSourceRegion)
-	if !ok {
-		err := fmt.Errorf("can not read environment variable %s", envSourceRegion)
-		loglib.Sugar.Error(err)
-		return "", err
-	}
+func getImageList() (ImageList, error) {
+	imageList := newImageListConst()
 
-	tenancyName, ok := os.LookupEnv(envTenancyName)
-	if !ok {
-		err := fmt.Errorf("can not read environment variable %s", envTenancyName)
-		loglib.Sugar.Error(err)
-		return "", err
-	}
-
-	bucketName, ok := os.LookupEnv(envBucketName)
-	if !ok {
-		err := fmt.Errorf("can not read environment variable %s", envBucketName)
-		loglib.Sugar.Error(err)
-		return "", err
-	}
-
-	url := "https://objectstorage." + regionName + ".oraclecloud.com/n/" + tenancyName + "/b/" + bucketName + "/o/" + imageName
-
-	loglib.Sugar.Infof("Generated ImageURL:" + url)
-
-	return url, nil
-}
-
-func saveImageMetadata(imageConst Image) error {
 	dsn, err := getDSN()
 	if err != nil {
 		loglib.Sugar.Error(err)
-		return err
+		return imageList, err
 	}
 
 	db, err := sql.Open("oci8", dsn)
 	if err != nil {
 		loglib.Sugar.Error(err)
-		return err
+		return imageList, err
 	}
 
 	defer db.Close()
 
-	err = insertMetadata(db, imageConst)
+	imageList, err = selectImage(db, imageList)
 	if err != nil {
 		loglib.Sugar.Error(err)
-		return err
+		return imageList, err
 	}
 
-	return nil
+	return imageList, nil
 }
 
-func insertMetadata(db *sql.DB, imageConst Image) error {
-	query := "INSERT INTO IMAGES (id, ImageName, Detail, ImageURL, UserName, CREATE_DATE, DELETED) " +
-		"values (:1, :2, :3, :4, :5, :6, :7)"
+func selectImage(db *sql.DB, imageList ImageList) (ImageList, error) {
+	query := "SELECT id, ImageName, Detail, ImageURL, UserName, CREATE_DATE, DELETED FROM (SELECT * FROM IMAGES ORDER BY CREATE_DATE DESC) A WHERE ROWNUM <= 10"
 
-	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Second)
-	_, err := db.ExecContext(ctx, query, imageConst.ID, imageConst.ImageName, imageConst.Detail, imageConst.ImageURL, imageConst.Owner, imageConst.CreateDate, imageConst.Deleted)
-	cancel()
+	var rows *sql.Rows
+	rows, err := db.Query(query)
+	defer rows.Close()
+
 	if err != nil {
 		loglib.Sugar.Error(err)
-		return err
+		return imageList, err
 	}
 
-	loglib.Sugar.Infof("Successful. Insert Metadata")
+	for rows.Next() {
+		var id sql.NullString
+		var imagename sql.NullString
+		var detail sql.NullString
+		var imageurl sql.NullString
+		var userName sql.NullString
+		var createDate time.Time
+		var deleted int
 
-	return nil
+		err := rows.Scan(&id, &imagename, &detail, &imageurl, &userName, &createDate, &deleted)
+		if err != nil {
+			loglib.Sugar.Error(err)
+			return imageList, err
+		}
+		fmt.Printf("id:%s, imagename:%s, detail:%s, imageurl:%s, userName:%s, createDate:%s deleted:%b\n",
+			validNull(id), validNull(imagename), validNull(detail), validNull(imageurl), validNull(userName), createDate, deleted)
+
+		image := Image{
+			ID:          validNull(id),
+			Object:      "Image",
+			Imagename:   validNull(imagename),
+			Detail:      validNull(detail),
+			ImageURL:    validNull(imageurl),
+			Owner:       validNull(userName),
+			CreatedDate: createDate,
+			Deleted:     deleted,
+		}
+
+		imageList.Data = append(imageList.Data, image)
+		imageList.Total = imageList.Total + 1
+	}
+
+	loglib.Sugar.Infof("Successful. Select Metadata")
+
+	return imageList, nil
+}
+
+func validNull(nullString sql.NullString) string {
+	if nullString.Valid {
+		return nullString.String
+	} else {
+		return ""
+	}
 }
 
 func getDSN() (string, error) {
