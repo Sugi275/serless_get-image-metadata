@@ -32,4 +32,4 @@ COPY tnsnames.ora /opt/oracle/instantclient_19_3/network/admin/tnsnames.ora
 # default user
 USER 1000:1000
 
-ENTRYPOINT ["/home/go-oracledb/get-image-metadata]
+ENTRYPOINT ["/home/go-oracledb/get-image-metadata"]
